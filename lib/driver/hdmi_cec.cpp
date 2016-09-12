@@ -7,7 +7,6 @@
 #include <lib/base/init_num.h>
 #include <lib/base/eerror.h>
 #include <lib/base/ebase.h>
-#include <lib/base/nconfig.h>
 #include <lib/driver/input_fake.h>
 #include <lib/driver/hdmi_cec.h>
 #include <lib/driver/avswitch.h>
@@ -53,12 +52,10 @@ eHdmiCEC::eHdmiCEC()
 	logicalAddress = 1;
 	deviceType = 1; /* default: recorder */
 #ifdef DREAMBOX
-#define HDMIDEV "/dev/misc/hdmi_cec0"
+	hdmiFd = ::open("/dev/misc/hdmi_cec0", O_RDWR | O_NONBLOCK);
 #else
-#define HDMIDEV "/dev/hdmi_cec"
+	hdmiFd = ::open("/dev/hdmi_cec", O_RDWR | O_NONBLOCK);
 #endif
-
-	hdmiFd = ::open(HDMIDEV, O_RDWR | O_NONBLOCK | O_CLOEXEC);
 	if (hdmiFd >= 0)
 	{
 
@@ -71,10 +68,6 @@ eHdmiCEC::eHdmiCEC()
 		getAddressInfo();
 		messageNotifier = eSocketNotifier::create(eApp, hdmiFd, eSocketNotifier::Read | eSocketNotifier::Priority);
 		CONNECT(messageNotifier->activated, eHdmiCEC::hdmiEvent);
-	}
-	else
-	{
-		eDebug("[eHdmiCEC] cannot open %s: %m", HDMIDEV);
 	}
 }
 
@@ -91,8 +84,6 @@ eHdmiCEC *eHdmiCEC::getInstance()
 void eHdmiCEC::reportPhysicalAddress()
 {
 	struct cec_message txmessage;
-	memset(&txmessage, 0, sizeof(txmessage));
-
 	txmessage.address = 0x0f; /* broadcast */
 	txmessage.data[0] = 0x84; /* report address */
 	txmessage.data[1] = physicalAddress[0];
@@ -159,7 +150,7 @@ void eHdmiCEC::getAddressInfo()
 			{
 				if (memcmp(physicalAddress, addressinfo.physical, sizeof(physicalAddress)))
 				{
-					eDebug("[eHdmiCEC] detected physical address change: %02X%02X --> %02X%02X", physicalAddress[0], physicalAddress[1], addressinfo.physical[0], addressinfo.physical[1]);
+					eDebug("eHdmiCEC: detected physical address change: %02X%02X --> %02X%02X", physicalAddress[0], physicalAddress[1], addressinfo.physical[0], addressinfo.physical[1]);
 					memcpy(physicalAddress, addressinfo.physical, sizeof(physicalAddress));
 					reportPhysicalAddress();
 					/* emit */ addressChanged((physicalAddress[0] << 8) | physicalAddress[1]);
@@ -238,36 +229,31 @@ void eHdmiCEC::hdmiEvent(int what)
 			}
 		}
 #endif
-		bool hdmicec_enabled = eConfigManager::getConfigBoolValue("config.hdmicec.enabled", false);
-		if (hasdata && hdmicec_enabled)
+		if (hasdata)
 		{
 			bool keypressed = false;
 			static unsigned char pressedkey = 0;
 
-			eDebugNoNewLineStart("[eHdmiCEC] received message");
+			eDebugNoNewLine("eHdmiCEC: received message");
 			for (int i = 0; i < rxmessage.length; i++)
 			{
 				eDebugNoNewLine(" %02X", rxmessage.data[i]);
 			}
-			eDebugEOL();
-			bool hdmicec_report_active_menu = eConfigManager::getConfigBoolValue("config.hdmicec.report_active_menu", false);
-			if (hdmicec_report_active_menu)
+			eDebug(" ");
+			switch (rxmessage.data[0])
 			{
-				switch (rxmessage.data[0])
+				case 0x44: /* key pressed */
+					keypressed = true;
+					pressedkey = rxmessage.data[1];
+				case 0x45: /* key released */
 				{
-					case 0x44: /* key pressed */
-						keypressed = true;
-						pressedkey = rxmessage.data[1];
-					case 0x45: /* key released */
+					long code = translateKey(pressedkey);
+					if (keypressed) code |= 0x80000000;
+					for (std::list<eRCDevice*>::iterator i(listeners.begin()); i != listeners.end(); ++i)
 					{
-						long code = translateKey(pressedkey);
-						if (keypressed) code |= 0x80000000;
-						for (std::list<eRCDevice*>::iterator i(listeners.begin()); i != listeners.end(); ++i)
-						{
-							(*i)->handleCode(code);
-						}
-						break;
+						(*i)->handleCode(code);
 					}
+					break;
 				}
 			}
 			ePtr<iCECMessage> msg = new eCECMessage(rxmessage.address, rxmessage.data[0], (char*)&rxmessage.data[1], rxmessage.length);
@@ -397,12 +383,12 @@ void eHdmiCEC::sendMessage(struct cec_message &message)
 {
 	if (hdmiFd >= 0)
 	{
-		eDebugNoNewLineStart("[eHdmiCEC] send message");
+		eDebugNoNewLine("eHdmiCEC: send message");
 		for (int i = 0; i < message.length; i++)
 		{
 			eDebugNoNewLine(" %02X", message.data[i]);
 		}
-		eDebugEOL();
+		eDebug(" ");
 #ifdef DREAMBOX
 		message.flag = 1;
 		::ioctl(hdmiFd, 3, &message);
